@@ -52,6 +52,7 @@
           [:url "https://opensource.org/license/epl-2-0/"]]]]})))
 
 (defn jar [_]
+  (clean _)
   (sync-pom _)
   (b/copy-dir {:src-dirs ["src" "resources"] :target-dir class-dir}) 
   (b/jar {:class-dir class-dir :jar-file jar-file}))
@@ -97,18 +98,21 @@
                                       (keep #(second (re-matches #"(.+).clj" %)))
                                       (map symbol))
                             (file-seq root)))]
-
     (with-open [w (io/writer (or (some-> out-file fs/file) *out*))]
       (binding [*out* w]
         (apply require `[~@test-namespaces :reload-all])
-        (run! #(binding [*ns* (the-ns %)] (test/run-tests %)) test-namespaces)))))
+        (reduce #(merge-with + %1 %2) nil
+          (eduction
+            (map #(binding [*ns* (the-ns %)] (test/run-tests %)))
+            (map #(select-keys % [:fail :error :pass]))
+            test-namespaces))))))
 
 (defn deploy [{:keys [test?] :as _opts}]
   (let [origin (str/trim (with-out-str (runit ["git" "config" "--get" "remote.origin.url"])))]
     (when-not (= repo?? origin)
       (throw (ex-info "origin not the same as repo in libdesc" {:origin origin :repo repo??}))))
   (let [b (str/trim (with-out-str (runit ["git" "rev-parse" "--abbrev-ref" "HEAD"])))]
-    (when-not (= "main" b)
+    (when-not (#{"main" "master"} b)
       (throw (ex-info "must be on main branch" {:branch b}))))
   (when-not (and
               (= 0 (runit ["git" "diff-index" "--quiet" "--cached" "HEAD" "--"]))
@@ -138,6 +142,7 @@
   (clean nil)
   (jar nil)
   (install nil)
+  (test-all nil)
   
   (deploy {:test? true})
 
