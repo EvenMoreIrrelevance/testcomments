@@ -2,5 +2,6 @@
 .cpcache/
 .calva/
 .clj-kondo/
+.vscode/
 target/
 .nrepl-port
