@@ -32,17 +32,6 @@
   #'test/is
   #'test/are)
 
-(defn -walked-forms [walker form]
-  (reify clojure.lang.IReduceInit
-    (reduce [_ f init]
-      (let [!result (volatile! init)]
-        (walker (fn [subform]
-                  (let [result @!result]
-                    (when-not (reduced? result) (vswap! !result f subform))
-                    subform))
-          form)
-        @!result))))
-
 (defn -potential-map-bindings
   [subform]
   (vec
