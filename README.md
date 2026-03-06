@@ -2,6 +2,10 @@
 
 Evil macros at the service of good testing.
 
+[![Clojars Project](https://img.shields.io/clojars/v/io.github.evenmoreirrelevance/testcomments.svg)](https://clojars.org/io.github.evenmoreirrelevance/testcomments)
+
+[![bb compatible](https://raw.githubusercontent.com/babashka/babashka/master/logo/badge.svg)](https://book.babashka.org#badges)
+
 ## Rationale
 
 Writing proper unit tests is *boooring*, but using `comment` forms is idiomatic, and writing evil macros is *fun* ... at least for me!
