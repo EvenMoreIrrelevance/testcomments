@@ -123,7 +123,9 @@
       (when (or (< 0 fail) (< 0 error))
         (throw (ex-info "tests failed." {:fail fail :error error})))))
   (let [tag (str "v" version)]
-    (when (= tag (str/trim (with-out-str (runit ["git" "tag" "--list" tag]))))
+    (when (and
+            (not (re-matches #".+[-]SNAPSHOT" version))
+            (= tag (str/trim (with-out-str (runit ["git" "tag" "--list" tag])))))
       (throw (ex-info "version already tagged" {:version version})))
     (jar _opts)
     (when-not (and
