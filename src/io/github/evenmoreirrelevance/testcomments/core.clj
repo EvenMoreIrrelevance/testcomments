@@ -4,33 +4,36 @@
             [clojure.walk :as walk]
             [clojure.template :as template]))
 
-(defmulti prepend-in-test-comment
-  "Transforms the expansion of the forms following `form`, represented
-   as a sequence of forms that will eventually be spliced into a `do`
-   or similar constructs. 
+(defmulti expand-in-test-comment
+  "Expands the form in a `test-comment` context,
+   dispatching on the symbolic representation of the head
+   if it resolves to a var.
+ 
+   Note that if no var is resolved, the form is simply ignored.
 
-   Dispatches on the resolved head of the form if it's a var. 
-   Note that if no var is resolved, the form is simply ignored."
-  (fn [_acc form]
+   Also note that expansion isn't to a fixpoint like with macros;
+   to trigger another expansion, you must call `expand-in-test-comment` manually, 
+   and to propagate the expansion to subforms you'll need to use `expand-test-comment-forms`."
+  (fn [form]
     (let [maybe-var (and
                       (seq? form)
                       (symbol? (first form))
                       (resolve (first form)))]
       (when (var? maybe-var)
-        maybe-var))))
+        (symbol maybe-var)))))
 
-(defmethod prepend-in-test-comment :default [acc _form] acc)
+(defmethod expand-in-test-comment :default [_form] nil)
 
-(defn xp-test-comment-context
-  "Expands `forms` in a `test-comment` context."
+(defn expand-test-comment-forms
+  "Expands `forms` in a `test-comment` context, discarding `nil` expansions.
+   Returns `nil` if no form expands into anything meaningful."
   [forms]
-  (not-empty (reduce prepend-in-test-comment nil (reverse forms))))
+  (not-empty (keep expand-in-test-comment forms)))
 
-(template/do-template [the-var] (defmethod prepend-in-test-comment the-var [acc form]
-                                  (cons form acc))
-  #'test/testing
-  #'test/is
-  #'test/are)
+(template/do-template [the-var] (defmethod expand-in-test-comment the-var [form] form)
+  `test/testing
+  `test/is
+  `test/are)
 
 (defn -potential-map-bindings
   [subform]
@@ -77,12 +80,11 @@
          (Throwable t#
            (throw (ex-info "something was thrown while evaluating `values`" vals# t#)))))))
 
-(defmethod prepend-in-test-comment #'values
-  [acc [_ bindings & body]]
-  (let [expanded-body (xp-test-comment-context body)]
-    (if-not expanded-body
-      acc
-      (cons `(let [~@bindings] ~@expanded-body) acc))))
+(defmethod expand-in-test-comment `values
+  [[_ bindings & body]]
+  (let [expanded-body (expand-test-comment-forms body)]
+    (when expanded-body
+      `(let [~@bindings] ~@expanded-body))))
 
 (defmacro -bind-it
   [form & body]
@@ -104,12 +106,10 @@
          (Throwable t#
            (throw (ex-info "something was thrown while evaluating `value`:" value# t#)))))))
 
-(defmethod prepend-in-test-comment #'value
-  [acc [_ form & body]]
-  (let [expanded-body (xp-test-comment-context body)]
-    (if-not expanded-body
-      acc
-      (cons `(-bind-it ~form ~@expanded-body) acc))))
+(defmethod expand-in-test-comment `value
+  [[_ form & body]]
+  (when-let [expanded-body (expand-test-comment-forms body)]
+    `(-bind-it ~form ~@expanded-body)))
 
 (defmacro bind
   "Binds the output of `forms` to the given vars, returning it. 
@@ -121,27 +121,27 @@
          `(def ~s ~s))
      v#))
 
-(defmethod prepend-in-test-comment #'bind
-  [acc form]
-  ; this actually works just fine given that `form` is now safe from `prepend-in-test-comment`.
-  (cons form acc))
+; this actually works just fine given that `form` is now safe from `prepend-in-test-comment`.
+(defmethod expand-in-test-comment `bind 
+  [form] 
+  form)
 
 (defmacro effect
   "Evaluates `forms` for a side effect, also in a `test-comment` context."
   [& forms]
   `(do ~@forms))
 
-(defmethod prepend-in-test-comment #'effect
-  [acc [_ & forms]]
-  (cons `(do ~@forms) acc))
+(defmethod expand-in-test-comment `effect
+  [[_ & forms]] 
+  `(do ~@forms))
 
 (defmacro value= 
   [form equal]
   `(value ~form (test/is (= ~equal ~'it))))
 
-(defmethod prepend-in-test-comment #'value=
-  [acc [_ form equal]]
-  (prepend-in-test-comment acc `(value ~form (test/is (= ~'it ~equal)))))
+(defmethod expand-in-test-comment `value=
+  [[_ form equal]]
+  (expand-in-test-comment `(value ~form (test/is (= ~'it ~equal)))))
 
 (defn -xp-test-comment
   [test-name [form-head & comment-forms :as wrapped-form]]
@@ -150,7 +150,7 @@
     (when-not (#{`comment `clj/comment} (symbol (resolve form-head)))
       {:form-head form-head
        :form wrapped-form}))
-  (when-let [test-content (xp-test-comment-context comment-forms)]
+  (when-let [test-content (expand-test-comment-forms comment-forms)]
     `(test/deftest ~test-name
        ~@test-content)))
 
@@ -181,16 +181,16 @@
 
 (test-comment test-xp-test-comment-content
   (comment
-    (value (xp-test-comment-context
+    (value (expand-test-comment-forms
              '[(effect "should io.github.evenmoreirrelevancet")
                "should not io.github.evenmoreirrelevancet"])
       (test/is (= it '((do "should io.github.evenmoreirrelevancet")))))
 
-    (value= (xp-test-comment-context
+    (value= (expand-test-comment-forms
               '[(value 3 (test/is (= it 4)))])
       '((io.github.evenmoreirrelevance.testcomments.core/-bind-it 3 (test/is (= it 4)))))
 
-    (value= (xp-test-comment-context
+    (value= (expand-test-comment-forms
               '[(bind [-tres -cuatros] [3 4])
 
                 -tres
@@ -212,7 +212,7 @@
     ; contentious behavior
     (values [expand-n-eval (fn [bad-form]
                              {:form bad-form
-                              :expanded (xp-test-comment-context bad-form)
+                              :expanded (expand-test-comment-forms bad-form)
                               :evaluated (util/catching {:ok? (eval bad-form)}
                                            (RuntimeException e {:err? e}))})
              bad-ns (expand-n-eval '(tezt/is (= 1 2)))
@@ -226,7 +226,7 @@
           (test/is (nil? (:expanded bad-var))))))
 
     (values [expanded
-             (xp-test-comment-context
+             (expand-test-comment-forms
                `[(bind ^:dynamic ^:private var# 3)
                  (effect (binding [var# 4] var#))])
              evaluated
@@ -237,7 +237,7 @@
 
     (comment
       ; fails due to lack of `&env` info in the dispatch for `prepend-in-test-comment`
-      (value (xp-test-comment-context
+      (value (expand-test-comment-forms
                '(values [effect (constantly :bar)]
                   (effect :lol)))
         (test/testing "&env accounted for in `xp-test-comment-context`."

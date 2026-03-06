@@ -1,4 +1,4 @@
-(ns io.github.evenmoreirrelevance.testcomments.util
+(ns ^:no-doc io.github.evenmoreirrelevance.testcomments.util
   (:require [clojure.string :as str]))
 
 (defn assoc-truthy
