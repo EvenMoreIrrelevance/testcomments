@@ -4,15 +4,13 @@
             [clojure.walk :as walk]
             [clojure.template :as template]))
 
-(when-let [remove-all-tests! (get (ns-publics *ns*) 'remove-all-tests!)]
-  (remove-all-tests!))
-
 (defmulti prepend-in-test-comment
   "Transforms the expansion of the forms following `form`, represented
    as a sequence of forms that will eventually be spliced into a `do`
    or similar constructs. 
 
-   Dispatches on the resolved head of the form if it's a var."
+   Dispatches on the resolved head of the form if it's a var. 
+   Note that if no var is resolved, the form is simply ignored."
   (fn [_acc form]
     (let [maybe-var (and
                       (seq? form)
@@ -24,6 +22,7 @@
 (defmethod prepend-in-test-comment :default [acc _form] acc)
 
 (defn xp-test-comment-context
+  "Expands `forms` in a `test-comment` context."
   [forms]
   (not-empty (reduce prepend-in-test-comment nil (reverse forms))))
 
@@ -33,15 +32,44 @@
   #'test/is
   #'test/are)
 
+(defn -walked-forms [walker form]
+  (reify clojure.lang.IReduceInit
+    (reduce [_ f init]
+      (let [!result (volatile! init)]
+        (walker (fn [subform]
+                  (let [result @!result]
+                    (when-not (reduced? result) (vswap! !result f subform))
+                    subform))
+          form)
+        @!result))))
+
+(defn -potential-map-bindings
+  [subform]
+  (vec
+    (concat
+      (filter some? [(get subform '&) (get subform :as)])
+      (keys subform)
+      (map symbol (:strs subform))
+      (map #(symbol (name %))
+        (concat (:keys subform) (:syms subform))))))
+
+(comment 
+  (-potential-map-bindings '{& a :as b})
+  *e)
+
 (defn -introduced-bindings
   [form]
-  (let [!found (volatile! [])]
-    (walk/postwalk (fn [f]
-                     (when (simple-symbol? f)
-                       (vswap! !found conj f))
-                     f)
+  (let [!found (volatile! #{})]
+    (walk/prewalk (fn [subform]
+                    (when (and
+                            (simple-symbol? subform)
+                            (not= '& subform))
+                      (vswap! !found conj subform))
+                    (if-not (map? subform)
+                      subform
+                      (-potential-map-bindings subform)))
       form)
-    (vec (distinct @!found))))
+    @!found))
 
 (defmacro values
   "Behaves like a `let`, but returns a map where `:result` is bound to the value of the last form in `body`,
@@ -95,8 +123,8 @@
       (cons `(-bind-it ~form ~@expanded-body) acc))))
 
 (defmacro bind
-  "Binds the output of `forms` to the given vars, returning it.
-   In a `test-comment` context, this only establishes lexical bindings!"
+  "Binds the output of `forms` to the given vars, returning it. 
+   Is evaluated in a `test-comment` context."
   [definition & forms]
   `(let [v# (do ~@forms)
          ~definition v#]
@@ -105,8 +133,9 @@
      v#))
 
 (defmethod prepend-in-test-comment #'bind
-  [acc [_ & binding]]
-  `[(let [~@binding] ~@acc)])
+  [acc form]
+  ; this actually works just fine given that `form` is now safe from `prepend-in-test-comment`.
+  (cons form acc))
 
 (defmacro effect
   "Evaluates `forms` for a side effect, also in a `test-comment` context."
@@ -116,6 +145,14 @@
 (defmethod prepend-in-test-comment #'effect
   [acc [_ & forms]]
   (cons `(do ~@forms) acc))
+
+(defmacro value= 
+  [form equal]
+  `(value ~form (test/is (= ~equal ~'it))))
+
+(defmethod prepend-in-test-comment #'value=
+  [acc [_ form equal]]
+  (prepend-in-test-comment acc `(value ~form (test/is (= ~'it ~equal)))))
 
 (defn -xp-test-comment
   [test-name [form-head & comment-forms :as wrapped-form]]
@@ -136,6 +173,23 @@
   (alter-meta! #'test-comment merge
     (select-keys (meta #'-xp-test-comment) [:arglists])))
 
+(test-comment test--introduced-bindings
+  (comment
+    (value (-introduced-bindings '[{:keys [a ::b c]
+                                    :syms [foo/bar]} d])
+      (test/testing "handles namespaced keywords in `:keys` and namespaced symbols in `:syms`"
+        (test/is (= (set it) '#{a b c d bar}))))
+
+    (value (-introduced-bindings '[[a & rest] {& b}])
+      (test/testing "discards `&` syntax marker"
+        (test/is (= (set it) '#{a b rest}))))
+
+    (value (-introduced-bindings '[{{& a :as b} 'miss}])
+      (test/testing "descends into map correctly")
+      (test/is (= (set it) '#{a b})))
+
+    *e))
+
 (test-comment test-xp-test-comment-content
   (comment
     (value (xp-test-comment-context
@@ -143,30 +197,65 @@
                "should not io.github.evenmoreirrelevancet"])
       (test/is (= it '((do "should io.github.evenmoreirrelevancet")))))
 
-    (value (xp-test-comment-context
-             '[(value 3 (test/is (= it 4)))])
-      (test/is (= it '((io.github.evenmoreirrelevance.testcomments.core/-bind-it 3 (test/is (= it 4)))))))
+    (value= (xp-test-comment-context
+              '[(value 3 (test/is (= it 4)))])
+      '((io.github.evenmoreirrelevance.testcomments.core/-bind-it 3 (test/is (= it 4)))))
 
-    (value (xp-test-comment-context
-             '[(bind [-tres -cuatros] [3 4])
+    (value= (xp-test-comment-context
+              '[(bind [-tres -cuatros] [3 4])
 
-               -tres
+                -tres
 
-               (effect (prn "should print"))
-               (prn "should not print")
+                (effect (prn "should print"))
+                (prn "should not print")
 
-               (test/testing "`testing` forms are picked up"
-                 (test/is (= -tres 3))
-                 (test/is (not= -cuatros 3)))
+                (test/testing "`testing` forms are picked up"
+                  (test/is (= -tres 3))
+                  (test/is (not= -cuatros 3)))
 
-               (test/is (not= -tres -cuatros))
-               *e])
-      (test/is
-        (= it
-          '[(clojure.core/let [[-tres -cuatros] [3 4]]
-              (do (prn "should print"))
-              (test/testing "`testing` forms are picked up" (test/is (= -tres 3)) (test/is (not= -cuatros 3)))
-              (test/is (not= -tres -cuatros)))])))
+                (test/is (not= -tres -cuatros))
+                *e])
+      '((bind [-tres -cuatros] [3 4])
+        (do (prn "should print"))
+        (test/testing "`testing` forms are picked up" (test/is (= -tres 3)) (test/is (not= -cuatros 3)))
+        (test/is (not= -tres -cuatros))))
+
+    ; contentious behavior
+    (values [expand-n-eval (fn [bad-form]
+                             {:form bad-form
+                              :expanded (xp-test-comment-context bad-form)
+                              :evaluated (util/catching {:ok? (eval bad-form)}
+                                           (RuntimeException e {:err? e}))})
+             bad-ns (expand-n-eval '(tezt/is (= 1 2)))
+             bad-var (expand-n-eval '(test/EMI_no_such_var 3))]
+      (test/testing "things that would induce a compilation failure are ignored instead"
+        (test/testing "bad namespace"
+          (test/is (some? (:err? (:evaluated bad-ns))))
+          (test/is (nil? (:expanded bad-ns))))
+        (test/testing "bad var"
+          (test/is (some? (:err? (:evaluated bad-var))))
+          (test/is (nil? (:expanded bad-var))))))
+
+    (values [expanded
+             (xp-test-comment-context
+               `[(bind ^:dynamic ^:private var# 3)
+                 (effect (binding [var# 4] var#))])
+             evaluated
+             (util/catching (eval (cons `do expanded))
+               (Throwable t t))]
+      (test/testing "dynamic vars handled correctly in `bind`"
+        (test/is (= evaluated 4))))
+
+    (comment
+      ; fails due to lack of `&env` info in the dispatch for `prepend-in-test-comment`
+      (value (xp-test-comment-context
+               '(values [effect (constantly :bar)]
+                  (effect :lol)))
+        (test/testing "&env accounted for in `xp-test-comment-context`."
+          (= nil it)))
+
+      "these fail")
+
     *e))
 
 (defn remove-all-tests!
@@ -179,9 +268,7 @@
 
 (test-comment test-test-comment
   (comment
-    (value 3
-      (test/is (= it 3)))
-
+    
     (values [-tres 3
              -cuatros 4]
       (test/testing "`testing` forms are picked up"
@@ -193,6 +280,7 @@
     *e))
 
 (comment
+  (remove-all-tests!)
   (test/run-tests)
 
   *e)

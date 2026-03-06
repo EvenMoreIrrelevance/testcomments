@@ -1,6 +1,6 @@
 {:io.github.evenmoreirrelevance/libdesc 
  {:lib io.github.evenmoreirrelevance/testcomments
-  :mvn/version "0.1.0-SNAPSHOT"
+  :mvn/version "0.2.0-SNAPSHOT"
   :repo "https://github.com/EvenMoreIrrelevance/testcomments.git"}
  
  :paths ["src" "resources"]

@@ -20,7 +20,7 @@ to change this behavior.
 
 - `effect` ensures the wrapped forms are always evaluated nonetheless;
 - `values` and its conveniency shorthand `value` introduce lexical bindings transparently to the transform; they also evaluate to the REPL in a convenient fashion that shows the value being bound;
-- `bind` establishes *lexical* bindings up to the end of the context; on the other hand, it creates `def`s at the REPL.
+- `bind` establishes `def` bindings, and conveniently returns what's bound.
 
 ## Extension
 
