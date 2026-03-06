@@ -1,0 +1,8 @@
+{:hooks
+ {:macroexpand
+  {io.github.evenmoreirrelevance.testcomments.util/catching io.github.evenmoreirrelevance.testcomments.util/catching
+   io.github.evenmoreirrelevance.testcomments.util/ensuring-cleanup io.github.evenmoreirrelevance.testcomments.util/ensuring-cleanup
+
+   io.github.evenmoreirrelevance.testcomments.core/test-comment io.github.evenmoreirrelevance.testcomments.core/test-comment
+   io.github.evenmoreirrelevance.testcomments.core/bind io.github.evenmoreirrelevance.testcomments.core/bind
+   io.github.evenmoreirrelevance.testcomments.core/value io.github.evenmoreirrelevance.testcomments.core/value}}}
