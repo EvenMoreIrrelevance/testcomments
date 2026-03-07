@@ -45,7 +45,7 @@
       (map #(symbol (name %))
         (concat (:keys subform) (:syms subform))))))
 
-(comment 
+(comment
   (-potential-map-bindings '{& a :as b})
   *e)
 
@@ -121,27 +121,14 @@
          `(def ~s ~s))
      v#))
 
-; this actually works just fine given that `form` is now safe from `prepend-in-test-comment`.
-(defmethod expand-in-test-comment `bind 
-  [form] 
-  form)
+(defmethod expand-in-test-comment `bind [form] form)
 
 (defmacro effect
   "Evaluates `forms` for a side effect, also in a `test-comment` context."
   [& forms]
   `(do ~@forms))
 
-(defmethod expand-in-test-comment `effect
-  [[_ & forms]] 
-  `(do ~@forms))
-
-(defmacro value= 
-  [form equal]
-  `(value ~form (test/is (= ~equal ~'it))))
-
-(defmethod expand-in-test-comment `value=
-  [[_ form equal]]
-  (expand-in-test-comment `(value ~form (test/is (= ~'it ~equal)))))
+(defmethod expand-in-test-comment `effect [form] form)
 
 (defn -xp-test-comment
   [test-name [form-head & comment-forms :as wrapped-form]]
@@ -150,9 +137,8 @@
     (when-not (#{`comment `clj/comment} (symbol (resolve form-head)))
       {:form-head form-head
        :form wrapped-form}))
-  (when-let [test-content (expand-test-comment-forms comment-forms)]
-    `(test/deftest ~test-name
-       ~@test-content)))
+  `(test/deftest ~test-name
+     ~@(expand-test-comment-forms comment-forms)))
 
 (do
   (defmacro test-comment
@@ -182,34 +168,39 @@
 (test-comment test-xp-test-comment-content
   (comment
     (value (expand-test-comment-forms
-             '[(effect "should io.github.evenmoreirrelevancet")
-               "should not io.github.evenmoreirrelevancet"])
-      (test/is (= it '((do "should io.github.evenmoreirrelevancet")))))
+             '[(effect "should emit")
+               "should not emit"])
+      (test/testing "effect passes through"
+        (test/is (= it '((effect "should emit"))))))
 
-    (value= (expand-test-comment-forms
-              '[(value 3 (test/is (= it 4)))])
-      '((io.github.evenmoreirrelevance.testcomments.core/-bind-it 3 (test/is (= it 4)))))
+    (value (expand-test-comment-forms
+             '[(value 3 (test/is (= it 4)))])
+      (test/testing "value expansion"
+        (test/is
+          (= it '((io.github.evenmoreirrelevance.testcomments.core/-bind-it 3 (test/is (= it 4))))))))
 
-    (value= (expand-test-comment-forms
-              '[(bind [-tres -cuatros] [3 4])
+    (value (expand-test-comment-forms
+             '[(bind [-tres -cuatros] [3 4])
 
-                -tres
+               -tres
 
-                (effect (prn "should print"))
-                (prn "should not print")
+               (effect (prn "should print"))
+               (prn "should not print")
 
-                (test/testing "`testing` forms are picked up"
-                  (test/is (= -tres 3))
-                  (test/is (not= -cuatros 3)))
+               (test/testing "`testing` forms are picked up"
+                 (test/is (= -tres 3))
+                 (test/is (not= -cuatros 3)))
 
-                (test/is (not= -tres -cuatros))
-                *e])
-      '((bind [-tres -cuatros] [3 4])
-        (do (prn "should print"))
-        (test/testing "`testing` forms are picked up" (test/is (= -tres 3)) (test/is (not= -cuatros 3)))
-        (test/is (not= -tres -cuatros))))
+               (test/is (not= -tres -cuatros))
+               *e])
+      (test/testing "expand-test-comment-forms smoke test"
+        (test/is
+          (= it
+            '((bind [-tres -cuatros] [3 4])
+              (effect (prn "should print"))
+              (test/testing "`testing` forms are picked up" (test/is (= -tres 3)) (test/is (not= -cuatros 3)))
+              (test/is (not= -tres -cuatros)))))))
 
-    ; contentious behavior
     (values [expand-n-eval (fn [bad-form]
                              {:form bad-form
                               :expanded (expand-test-comment-forms bad-form)
@@ -257,7 +248,7 @@
 
 (test-comment test-test-comment
   (comment
-    
+
     (values [-tres 3
              -cuatros 4]
       (test/testing "`testing` forms are picked up"
