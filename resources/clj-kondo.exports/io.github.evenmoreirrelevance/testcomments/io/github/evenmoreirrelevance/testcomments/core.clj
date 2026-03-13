@@ -35,9 +35,8 @@
   (let [introduced (-introduced-bindings definition)]
     `(let [v# (do ~@forms)
            ~definition v#]
-       [~@(for [s introduced]
-            `(def ~s ~s))
-        v#])))
+       ~@(for [s introduced] `(def ~s ~s))
+       v#)))
 
 (defmacro test-comment
   [_test-name [form-head :as wrapped-form]]

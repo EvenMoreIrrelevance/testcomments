@@ -160,8 +160,8 @@
         (test/is (= (set it) '#{a b rest}))))
 
     (value (-introduced-bindings '[{{& a :as b} 'miss}])
-      (test/testing "descends into map correctly")
-      (test/is (= (set it) '#{a b})))
+      (test/testing "descends into map correctly"
+        (test/is (= (set it) '#{a b}))))
 
     *e))
 
