@@ -1,16 +1,17 @@
 (ns io.github.evenmoreirrelevance.testcomments.core
-  (:require [io.github.evenmoreirrelevance.testcomments.util :as util]
-            [clojure.walk :as walk]))
+  (:require [clojure.walk :as walk]))
+
+(defn -elide-nonbindings [list-bindings]
+  (take-while #(not= '& %) list-bindings))
 
 (defn -potential-map-bindings
   [subform]
   (vec
     (concat
-      (filter some? [(get subform '&) (get subform :as)])
       (keys subform)
-      (map symbol (:strs subform))
+      (filter some? [(get subform '&) (get subform :as) (get subform :select)])
       (map #(symbol (name %))
-        (concat (:keys subform) (:syms subform))))))
+        (mapcat #(-elide-nonbindings (get subform %)) [:strs :strs! :keys :keys! :syms :syms!])))))
 
 (comment
   (-potential-map-bindings '{& a :as b})
@@ -39,13 +40,8 @@
        v#)))
 
 (defmacro test-comment
-  [_test-name [form-head :as wrapped-form]]
-  (util/ensure-false
-    "wrapped form not a comment"
-    (when-not (= `comment (symbol (resolve form-head)))
-      {:form-head form-head
-       :form wrapped-form}))
-  wrapped-form)
+  [test-name & forms]
+  `(clojure.test/deftest ~test-name ~@forms))
 
 (defmacro value
   [form & body]

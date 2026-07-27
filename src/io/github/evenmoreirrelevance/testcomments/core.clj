@@ -35,15 +35,17 @@
   `test/is
   `test/are)
 
+(defn -elide-nonbindings [list-bindings]
+  (take-while #(not= '& %) list-bindings))
+
 (defn -potential-map-bindings
   [subform]
   (vec
     (concat
-      (filter some? [(get subform '&) (get subform :as)])
       (keys subform)
-      (map symbol (:strs subform))
+      (filter some? [(get subform '&) (get subform :as) (get subform :select)])
       (map #(symbol (name %))
-        (concat (:keys subform) (:syms subform))))))
+        (mapcat #(-elide-nonbindings (get subform %)) [:strs :strs! :keys :keys! :syms :syms!])))))
 
 (comment
   (-potential-map-bindings '{& a :as b})
@@ -130,114 +132,133 @@
 
 (defmethod expand-in-test-comment `effect [form] form)
 
-(defn -xp-test-comment
-  [test-name [form-head & comment-forms :as wrapped-form]]
-  (util/ensure-false
-    "wrapped form must be a comment"
-    (when-not (#{`comment `clj/comment} (symbol (resolve form-head)))
-      {:form-head form-head
-       :form wrapped-form}))
-  `(test/deftest ~test-name
-     ~@(expand-test-comment-forms comment-forms)))
+(defn -comment-form?? [form]
+  (when (and
+          (seq? form)
+          (let [[h] form]
+            (and
+              (symbol? h)
+              (= (var comment) (resolve h)))))
+    form))
 
-(do
-  (defmacro test-comment
-    "Wraps a `comment` form, expanding into a `deftest` with the given `test-name`."
-    [& syntax]
-    (apply -xp-test-comment syntax))
-  (alter-meta! #'test-comment merge
-    (select-keys (meta #'-xp-test-comment) [:arglists])))
+(defn -xp-test-comment
+  [test-name forms]
+  (if-let [[_ & compat-body] (-comment-form?? (first forms))]
+    (do
+      (util/ensure-false
+        "backwards-compatible `(test-comment (comment ...))` requires exactly one form."
+        (not= 1 (count forms)))
+      (recur test-name compat-body))
+    `(test/deftest ~test-name
+       ~@(expand-test-comment-forms forms))))
+
+(defmacro test-comment
+  "Expands into a `deftest` where the body is expanded in a test-comment context.
+   Has a deprecated `(test-comment (comment ...))` syntax which effectively behaves as if the `comment`'s body
+   was its the whole form's body."
+  {:arglists '[[test-name comment-form] [test-name noncomment-form & more-forms]]}
+  [test-name & forms-or-comment-form]
+  (-xp-test-comment test-name forms-or-comment-form))
 
 (test-comment test--introduced-bindings
-  (comment
-    (value (-introduced-bindings '[{:keys [a ::b c]
-                                    :syms [foo/bar]} d])
-      (test/testing "handles namespaced keywords in `:keys` and namespaced symbols in `:syms`"
-        (test/is (= (set it) '#{a b c d bar}))))
+  (value (-introduced-bindings '[{:keys [a ::b c]
+                                  :syms [foo/bar]} d])
+    (test/testing "handles namespaced keywords in `:keys` and namespaced symbols in `:syms`"
+      (test/is (= (set it) '#{a b c d bar}))))
 
-    (value (-introduced-bindings '[[a & rest] {& b}])
-      (test/testing "discards `&` syntax marker"
-        (test/is (= (set it) '#{a b rest}))))
+  (value (-introduced-bindings '[[a & rest] {& b}])
+    (test/testing "discards `&` syntax marker"
+      (test/is (= (set it) '#{a b rest}))))
 
-    (value (-introduced-bindings '[{{& a :as b} 'miss}])
-      (test/testing "descends into map correctly"
-        (test/is (= (set it) '#{a b}))))
+  (value (-introduced-bindings '[{{& a :as b} 'miss}])
+    (test/testing "descends into map correctly"
+      (test/is (= (set it) '#{a b}))))
 
-    *e))
+  (value (-introduced-bindings '[{:select foo :keys! [a b c & :d]}])
+    (test/testing "1.13 compat"
+      (test/is (= (set it) '#{foo a b c}))))
+
+  *e)
 
 (test-comment test-xp-test-comment-content
+  (value (expand-test-comment-forms
+           '[(effect "should emit")
+             "should not emit"])
+    (test/testing "effect passes through"
+      (test/is (= it '((effect "should emit"))))))
+
+
+  (value (expand-test-comment-forms
+           '[(value 3 (test/is (= it 4)))])
+    (test/testing "value expansion"
+      (test/is
+        (= it '((io.github.evenmoreirrelevance.testcomments.core/-bind-it 3 (test/is (= it 4))))))))
+
+
+  (value (expand-test-comment-forms
+           '[(bind [-tres -cuatros] [3 4])
+
+             -tres
+
+             (effect (prn "should print"))
+             (prn "should not print")
+
+             (test/testing "`testing` forms are picked up"
+               (test/is (= -tres 3))
+               (test/is (not= -cuatros 3)))
+
+             (test/is (not= -tres -cuatros))
+             *e])
+    (test/testing "expand-test-comment-forms smoke test"
+      (test/is
+        (= it
+          '((bind [-tres -cuatros] [3 4])
+            (effect (prn "should print"))
+            (test/testing "`testing` forms are picked up" (test/is (= -tres 3)) (test/is (not= -cuatros 3)))
+            (test/is (not= -tres -cuatros)))))))
+
+
+  (values [expand-n-eval (fn [bad-form]
+                           {:form bad-form
+                            :expanded (expand-test-comment-forms bad-form)
+                            :evaluated (util/catching {:ok? (eval bad-form)}
+                                         (RuntimeException e {:err? e}))})
+           bad-ns (expand-n-eval '(tezt/is (= 1 2)))
+           bad-var (expand-n-eval '(test/EMI_no_such_var 3))]
+    (test/testing "things that would induce a compilation failure are ignored instead"
+      (test/testing "bad namespace"
+        (test/is (some? (:err? (:evaluated bad-ns))))
+        (test/is (nil? (:expanded bad-ns))))
+      (test/testing "bad var"
+        (test/is (some? (:err? (:evaluated bad-var))))
+        (test/is (nil? (:expanded bad-var))))))
+
+
+  (values [expanded
+           (expand-test-comment-forms
+             `[(bind ^:dynamic ^:private var# 3)
+               (effect (binding [var# 4] var#))])
+           evaluated
+           (util/catching (eval (cons `do expanded))
+             (Throwable t t))]
+    (test/testing "dynamic vars handled correctly in `bind`"
+      (test/is (= evaluated 4))))
+
+
   (comment
-    (value (expand-test-comment-forms
-             '[(effect "should emit")
-               "should not emit"])
-      (test/testing "effect passes through"
-        (test/is (= it '((effect "should emit"))))))
-
-    (value (expand-test-comment-forms
-             '[(value 3 (test/is (= it 4)))])
-      (test/testing "value expansion"
-        (test/is
-          (= it '((io.github.evenmoreirrelevance.testcomments.core/-bind-it 3 (test/is (= it 4))))))))
-
-    (value (expand-test-comment-forms
-             '[(bind [-tres -cuatros] [3 4])
-
-               -tres
-
-               (effect (prn "should print"))
-               (prn "should not print")
-
-               (test/testing "`testing` forms are picked up"
-                 (test/is (= -tres 3))
-                 (test/is (not= -cuatros 3)))
-
-               (test/is (not= -tres -cuatros))
-               *e])
-      (test/testing "expand-test-comment-forms smoke test"
-        (test/is
-          (= it
-            '((bind [-tres -cuatros] [3 4])
-              (effect (prn "should print"))
-              (test/testing "`testing` forms are picked up" (test/is (= -tres 3)) (test/is (not= -cuatros 3)))
-              (test/is (not= -tres -cuatros)))))))
-
-    (values [expand-n-eval (fn [bad-form]
-                             {:form bad-form
-                              :expanded (expand-test-comment-forms bad-form)
-                              :evaluated (util/catching {:ok? (eval bad-form)}
-                                           (RuntimeException e {:err? e}))})
-             bad-ns (expand-n-eval '(tezt/is (= 1 2)))
-             bad-var (expand-n-eval '(test/EMI_no_such_var 3))]
-      (test/testing "things that would induce a compilation failure are ignored instead"
-        (test/testing "bad namespace"
-          (test/is (some? (:err? (:evaluated bad-ns))))
-          (test/is (nil? (:expanded bad-ns))))
-        (test/testing "bad var"
-          (test/is (some? (:err? (:evaluated bad-var))))
-          (test/is (nil? (:expanded bad-var))))))
-
-    (values [expanded
-             (expand-test-comment-forms
-               `[(bind ^:dynamic ^:private var# 3)
-                 (effect (binding [var# 4] var#))])
-             evaluated
-             (util/catching (eval (cons `do expanded))
-               (Throwable t t))]
-      (test/testing "dynamic vars handled correctly in `bind`"
-        (test/is (= evaluated 4))))
-
-    (comment
       ; fails due to lack of `&env` info in the dispatch for `prepend-in-test-comment`
-      (value (expand-test-comment-forms
-               '(values [effect (constantly :bar)]
-                  (effect :lol)))
-        (test/testing "&env accounted for in `xp-test-comment-context`."
-          (= nil it)))
+    (value (expand-test-comment-forms
+             '(values [effect (constantly :bar)]
+                (effect :lol)))
+      (test/testing "&env accounted for in `xp-test-comment-context`."
+        (= nil it)))
 
-      "these fail")
+    "these fail")
 
-    *e))
 
+  *e)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (defn remove-all-tests!
   "Removes all tests in the namespace, defaulting to `*ns*`."
   ([] (remove-all-tests! *ns*))
@@ -247,20 +268,12 @@
        (ns-publics the-ns)))))
 
 (test-comment test-test-comment
-  (comment
+  (values [-tres 3
+           -cuatros 4]
+    (test/testing "`testing` forms are picked up"
+      (test/is (= -tres 3))
+      (test/is (not= -cuatros 3)))
 
-    (values [-tres 3
-             -cuatros 4]
-      (test/testing "`testing` forms are picked up"
-        (test/is (= -tres 3))
-        (test/is (not= -cuatros 3)))
-
-      (test/is (not= -tres -cuatros)))
-
-    *e))
-
-(comment
-  (remove-all-tests!)
-  (test/run-tests)
+    (test/is (not= -tres -cuatros)))
 
   *e)
